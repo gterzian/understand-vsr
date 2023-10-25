@@ -46,6 +46,11 @@ Init == /\ viewNum = [r \in Replica |->  0]
         /\ msgs = {}
         /\ primary = CHOOSE x \in Replica: TRUE
 
+ReplacePrimary == /\ primary' = CHOOSE x \in Replica \ {primary}: TRUE
+                  /\ UNCHANGED<<viewNum, status, opNum, 
+                                log, commitNum, msgs, 
+                                    clientTable, clientRequest>>
+
 SendRequest(client) == /\ clientRequest[client] < N
                        /\ clientRequest' = [clientRequest EXCEPT ![client] = @ + 1]
                        /\ msgs' = msgs \cup 
@@ -76,10 +81,11 @@ Next == \/ \E c \in Client:
             \/ SendRequest(c)
         \/ \E r \in Replica:
             \/ HandleRequest(r)
+        \/ ReplacePrimary
 
 Spec  ==  Init  /\  [][Next]_<<viewNum, status, opNum, 
                                 log, commitNum, msgs, 
-                                    clientTable, clientRequest>>
+                                    clientTable, clientRequest, primary>>
 ============================================================================
 THEOREM  Spec  =>  [](TypeOk)
 =============================================================================
