@@ -17,8 +17,7 @@ Message ==
            [type: {"REQUEST"}, 
             clientId: Client, 
             requestNum: Op,
-            primary: Replica,
-            v: View]
+            primary: Replica]
             \cup
             \* Normal operation 
             [type: {"PREPARE"},
@@ -26,11 +25,9 @@ Message ==
              m: [type: {"REQUEST"}, 
                  clientId: Client, 
                  requestNum: Op,
-                 primary: Replica,
-                 v: View],
+                 primary: Replica],
              n: Op,
-             k: Op,
-             primary: Replica
+             k: Op
              ]
              \cup
              [type: {"PREPAREOK"}, 
@@ -97,7 +94,7 @@ TypeOk == /\ viewNum \in [Replica -> View]
           /\ primary \in Replica
 
 \* Safety property of view changes.
-ViewChangeOk == \A r1, r2 \in Client:
+ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
                      /\ commitNum[r1] = commitNum[r2]
                      /\ commitNum[r1] > 0
@@ -119,7 +116,7 @@ Init == /\ viewNum = [r \in Replica |->  0]
         /\ primary = CHOOSE x \in Replica: TRUE
 
 \* View Change: step 1. 
-\* A replica(from) notices the need for a view change,
+\* A replica notices the need for a view change,
 \* based on its own timer, 
 \* here modeled as a switch of the primary.
 ReplacePrimary(r)==  /\ r # primary
@@ -268,8 +265,7 @@ SendRequest(client) == /\ clientRequest[client] < N
                             [type: {"REQUEST"}, 
                                 clientId: {client}, 
                                 requestNum: {clientRequest[client]'},
-                                primary: {primary},
-                                v: {viewNum[primary]}]
+                                primary: {primary}]
                        /\ UNCHANGED<<primary, viewNum, status, opNum, 
                                 log, commitNum, clientTable, lastNormal>>
 
@@ -289,8 +285,7 @@ HandleRequest(r) == /\ r = primary
                              v: {viewNum[r]},
                              m: {msg},
                              n: {opNum[r]'},
-                             k: {commitNum[r]},
-                             primary: {r}
+                             k: {commitNum[r]}
                             ]
                         /\ UNCHANGED<<primary, viewNum, status, 
                                         commitNum, clientRequest, lastNormal>>
@@ -312,7 +307,7 @@ HandlePrepare(r) == /\ r # primary
                              v: {viewNum[r]},
                              n: {opNum[r]'},
                              i: {r},
-                             primary: {msg.primary}
+                             primary: {msg.m.primary}
                             ]
                         /\ UNCHANGED<<primary, viewNum, status, 
                                         clientRequest, lastNormal>>
