@@ -350,7 +350,8 @@ HandleCommit(r) == /\ r # primary
                         /\ msg.type = "COMMIT"
                         /\ msg.v = viewNum[r]
                         \* TODO: should > ?
-                        /\ msg.k < commitNum[r]
+                        /\ msg.k > commitNum[r]
+                        /\ msg.k =< opNum[r]
                         /\ commitNum' = [commitNum EXCEPT ![r] = msg.k]
                         /\ UNCHANGED<<viewNum, status, opNum, log, 
                                 msgs, clientTable, clientRequest, 
@@ -428,4 +429,3 @@ Spec  ==  Init  /\  [][Next]_<<viewNum, status, opNum, log, commitNum,
 ============================================================================
 THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk)
 =============================================================================
-
