@@ -1,31 +1,38 @@
 -------------------------------- MODULE VSR --------------------------------
 EXTENDS FiniteSets, Naturals
 VARIABLE viewNum, status, opNum, log, commitNum, 
-            msgs, clientTable, clientRequest, primary, lastNormal
+            msgs, clientTable, clientRequest, lastNormal, nounce
 CONSTANT N, Empty, F
 ----------------------------------------------------------------------------
 
-Replica == 0..N
-Client == 0..N
-View == 0..N
-Op == 0..N
+Replica == 1..N
+Client == 1..N
+View == 1..N
+Op == 1..N
 LogEntry == Client \X Op
 ASSUME Empty \notin LogEntry
 
+\* Round-robin primary using viewNum
+IsPrimary(r) == viewNum[r] % N = r
+
+\* The set of messages.
+\*
+\* We use a set to model:
+\* 1. Re-ordering and re-delivery of messages.
+\* 2. The local per-replica buffer 
+\*    of messages not ready for processing(same as re-delivery when ready).
 Message == 
            \* Client request.
            [type: {"REQUEST"}, 
             clientId: Client, 
-            requestNum: Op,
-            primary: Replica]
+            requestNum: Op]
             \cup
             \* Normal operation 
             [type: {"PREPARE"},
              v: View,
              m: [type: {"REQUEST"}, 
                  clientId: Client, 
-                 requestNum: Op,
-                 primary: Replica],
+                 requestNum: Op],
              n: Op,
              k: Op
              ]
@@ -33,8 +40,7 @@ Message ==
              [type: {"PREPAREOK"}, 
               v: View,
               n: Op,
-              i: Replica,
-              primary: Replica
+              i: Replica
              ]
              \cup
              [type: {"COMMIT"}, 
@@ -58,8 +64,7 @@ Message ==
              \* View change messages.
              [type: {"STARTVIEWCHANGE"},
               v: View,
-              i: Replica,
-              primary: Replica
+              i: Replica
              ]
              \cup
              [type: {"DOVIEWCHANGE"},
@@ -68,8 +73,7 @@ Message ==
               n: Op,
               l: [Op -> {Empty} \cup LogEntry],
               k: Op,
-              i: Replica,
-              primary: Replica
+              i: Replica
              ]
              \cup
              [type: {"StartView"},
@@ -78,6 +82,21 @@ Message ==
               n: Op,
               k: Op,
               i: Replica
+             ]
+             \* Recovery
+             \cup
+             [type: {"RECOVERY"},
+              x: Replica \X Op,
+              i: Replica
+             ]
+             \cup
+             [type: {"RECOVERYRESPONSE"},
+              v: View, 
+              x: Replica \X Op, 
+              l: [Op -> {Empty} \cup LogEntry], 
+              n: Op, 
+              k: Op,
+              isPrimary: BOOLEAN
              ]
 
 \* The type invariant.
@@ -90,78 +109,53 @@ TypeOk == /\ viewNum \in [Replica -> View]
           /\ log \in [Replica -> [Op -> {Empty} \cup LogEntry]]
           /\ clientTable \in [Replica -> [Client -> Op]]
           /\ clientRequest \in [Client -> Op]
+          /\ nounce \in [Replica -> Replica \X Op]
           /\ msgs \subseteq Message
-          /\ primary \in Replica
 
 \* Safety property of view changes.
 ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
                      /\ commitNum[r1] = commitNum[r2]
-                     /\ commitNum[r1] > 0
+                     /\ commitNum[r1] > 1
                      /\ status[r1] = status[r2]
                      /\ status[r1] = "normal") =>
-                         \A n \in 0..commitNum[r1]: 
+                         \A n \in 1..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
 -----------------------------------------------------------------------------
 
-Init == /\ viewNum = [r \in Replica |->  0]
-        /\ lastNormal = [r \in Replica |->  0]
-        /\ opNum = [r \in Replica |->  0]
-        /\ commitNum = [r \in Replica |-> 0]
+Init == /\ viewNum = [r \in Replica |->  1]
+        /\ lastNormal = [r \in Replica |->  1]
+        /\ opNum = [r \in Replica |->  1]
+        /\ commitNum = [r \in Replica |-> 1]
         /\ status = [r \in Replica |->  "normal"]
         /\ log = [r \in Replica |->  [op \in Op |-> Empty]]
-        /\ clientTable = [r \in Replica |->  [c \in Client |-> 0]]
-        /\ clientRequest = [c \in Client |-> 0]
+        /\ clientTable = [r \in Replica |->  [c \in Client |-> 1]]
+        /\ clientRequest = [c \in Client |-> 1]
+        /\ nounce = [r \in Replica |->  <<r, 1>>]
         /\ msgs = {}
-        /\ primary = CHOOSE x \in Replica: TRUE
 
 \* View Change: step 1. 
 \* A replica notices the need for a view change,
-\* based on its own timer, 
-\* here modeled as a switch of the primary.
-ReplacePrimary(r)==  /\ r # primary
-                     /\ viewNum[r] < N
+\* based on its own timer(here modeled as simply "happening").
+ReplacePrimary(r)==  /\ viewNum[r] < N
                      /\ status[r] = "normal"
-                     /\ primary' = CHOOSE x \in Replica \ {primary}: TRUE
                      /\ status' = [status EXCEPT ![r] = "view-change"]
                      /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
                      /\ viewNum' = [viewNum EXCEPT ![r] = @ + 1]
                      /\ msgs' = msgs \cup 
                        [type: {"STARTVIEWCHANGE"},
                         v: {viewNum[r]'},
-                        i: {r},
-                        primary: {primary'}
+                        i: {r}
                        ]
                      /\ UNCHANGED<<opNum, 
                                 log, commitNum, 
-                                    clientTable, clientRequest>>
+                                    clientTable, clientRequest, nounce>>
 
 \* View Change: step 1.
 \* A replica notices the need for a view change 
-\* because it receives a STARTVIEWCHANGE message.
-HandleStartViewChange(r) == \E msg \in msgs:
-                                /\ msg.type = "STARTVIEWCHANGE"
-                                /\ msg.i # r
-                                /\ msg.v > viewNum[r]
-                                /\ status[r] = "normal"
-                                /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
-                                /\ viewNum' = [viewNum EXCEPT ![r] = msg.v]
-                                /\ status' = [status EXCEPT ![r] = "view-change"]
-                                /\ msgs' = msgs \cup
-                                    [type: {"STARTVIEWCHANGE"},
-                                     v: {msg.v},
-                                     i: {r},
-                                     primary: {msg.primary}
-                                    ]
-                                /\ UNCHANGED<<primary, opNum, 
-                                                log, commitNum, 
-                                                clientTable, clientRequest>>
-
-\* View Change: step 1.
-\* A replica notices the need for a view change 
-\* because it receives a DOVIEWCHANGE message.
-HandleDoViewChange(r) == \E msg \in msgs:
-                            /\ msg.type = "DOVIEWCHANGE"
+\* because it receives a DOVIEWCHANGE or a STARTVIEWCHANGE message.
+NoticeViewChange(r) == \E msg \in msgs:
+                            /\ msg.type \in {"DOVIEWCHANGE", "STARTVIEWCHANGE"}
                             /\ msg.i # r 
                             /\ msg.v > viewNum[r]
                             /\ status[r] = "normal"
@@ -171,23 +165,20 @@ HandleDoViewChange(r) == \E msg \in msgs:
                             /\ msgs' = msgs \cup
                                     [type: {"STARTVIEWCHANGE"},
                                      v: {msg.v},
-                                     i: {r},
-                                     primary: {msg.primary}
+                                     i: {r}
                                     ]
-                            /\ UNCHANGED<<primary, opNum, 
+                            /\ UNCHANGED<<opNum, 
                                                 log, commitNum,
-                                                clientTable, clientRequest>>
+                                                clientTable, clientRequest, nounce>>
 
 \* View Change: step 2.
 \* When a replica receives STARTVIEWCHANGE messages 
 \* for its view-number from f other replicas.
-SendDoViewChange(r) == \E rr \in Replica:
-                       LET
+SendDoViewChange(r) == LET
                           startViewMsgs == {msg \in msgs: 
                                             /\ msg.type = "STARTVIEWCHANGE"
                                             /\ msg.v = viewNum[r]
-                                            /\ msg.i # r
-                                            /\ msg.primary = rr}
+                                            /\ msg.i # r}
                           hasQuorum == Cardinality(startViewMsgs) >= F
                        IN          
                        /\ status[r] = "view-change"
@@ -198,12 +189,11 @@ SendDoViewChange(r) == \E rr \in Replica:
                                 n: {opNum[r]},
                                 l: {log[r]},
                                 k: {commitNum[r]},
-                                i: {r},
-                                primary: {rr}
+                                i: {r}
                                ]
                        /\ UNCHANGED<<viewNum, status, opNum, lastNormal,
                                             log, commitNum,
-                                                clientTable, clientRequest, primary>>
+                                                clientTable, clientRequest, nounce>>
                             
 
 \* View Change: step 3.
@@ -214,18 +204,16 @@ CompleteViewChange(r) == LET
                                             \/ /\ y.lastNormalV = x.lastNormalV 
                                                /\ y.n <= x.n
                             MaxCommitNum(S) == CHOOSE x \in S : \A y \in S : y.k <= x.k
-                            doViewmsgs == {msg \in msgs: 
-                                            /\ msg.type = "DOVIEWCHANGE"
-                                            /\ msg.v = viewNum[r]
-                                            /\ msg.primary = r}
+                            doViewmsgs == {msg \in msgs: msg.type = "DOVIEWCHANGE" /\ msg.v = viewNum[r]}
                             hasQuorum == Cardinality(doViewmsgs) >= F+1
                             newLog == MaxLog(doViewmsgs).l
                             newLogTopOp == MaxLog(doViewmsgs).n
                             topOpNum == IF newLog[newLogTopOp] \in LogEntry 
                                             THEN newLog[newLogTopOp][2] 
-                                        ELSE 0
+                                        ELSE 1
                             newCommitNum == MaxCommitNum(doViewmsgs).k
                          IN
+                         /\ IsPrimary(r)
                          /\ hasQuorum
                          /\ status[r] = "view-change"
                          /\ status' = [status EXCEPT ![r] = "normal"]
@@ -240,23 +228,22 @@ CompleteViewChange(r) == LET
                                  k: {commitNum[r]'},
                                  i: {r}
                                 ] 
-                         /\ UNCHANGED<<clientTable, clientRequest, lastNormal, viewNum, primary>>
+                         /\ UNCHANGED<<clientTable, viewNum, clientRequest, lastNormal, nounce>>
 
 \* View Change: step 5.
 HandleStartView(r) == \E msg \in msgs:
-                        /\ primary # r
+                        /\ ~IsPrimary(r)
                         /\ msg.type = "StartView"
                         /\ status[r] = "view-change"
-                        /\ msg.i # r 
+                        /\ msg.i # r
                         /\ msg.v = viewNum[r]
-                        /\ viewNum' = [viewNum EXCEPT ![r] = msg.v]
-                        /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]']
+                        /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
                         /\ status' = [status EXCEPT ![r] = "normal"]
                         /\ log' = [log EXCEPT ![r] = msg.l]
                         \* TODO: execute and prepare uncommitted.
                         /\ commitNum' = [commitNum EXCEPT ![r] = msg.k]
                         /\ opNum' = [opNum EXCEPT ![r] = msg.n]
-                        /\ UNCHANGED<<msgs, clientTable, clientRequest, primary>>
+                        /\ UNCHANGED<<msgs, clientTable, clientRequest, viewNum, nounce>>
 
 \* Normal operation: Step 1.
 SendRequest(client) == /\ clientRequest[client] < N
@@ -264,18 +251,18 @@ SendRequest(client) == /\ clientRequest[client] < N
                        /\ msgs' = msgs \cup 
                             [type: {"REQUEST"}, 
                                 clientId: {client}, 
-                                requestNum: {clientRequest[client]'},
-                                primary: {primary}]
-                       /\ UNCHANGED<<primary, viewNum, status, opNum, 
-                                log, commitNum, clientTable, lastNormal>>
+                                requestNum: {clientRequest[client]'}]
+                       /\ UNCHANGED<<viewNum, status, opNum, 
+                                log, commitNum, clientTable, lastNormal, nounce>>
 
 \* Normal operation: Step 2 and 3.
-HandleRequest(r) == /\ r = primary
+HandleRequest(r) == 
                     /\ status[r] = "normal"
                     /\ opNum[r] < N
                     /\ \E msg \in msgs:
                         /\ msg.type = "REQUEST"
-                        /\ msg.primary = r
+                        /\ clientTable[r][msg.clientId] < N
+                        /\ IsPrimary(r)
                         /\ msg.requestNum > clientTable[r][msg.clientId]
                         /\ opNum' = [opNum EXCEPT ![r] = @ + 1]
                         /\ log' = [log EXCEPT ![r][opNum[r]'] = <<msg.clientId, opNum[r]'>>]
@@ -287,15 +274,16 @@ HandleRequest(r) == /\ r = primary
                              n: {opNum[r]'},
                              k: {commitNum[r]}
                             ]
-                        /\ UNCHANGED<<primary, viewNum, status, 
-                                        commitNum, clientRequest, lastNormal>>
+                        /\ UNCHANGED<<viewNum, status, 
+                                        commitNum, clientRequest, lastNormal, nounce>>
 
 \* Normal operation: Step 4 and 7(new commit in prepare).
-HandlePrepare(r) == /\ r # primary
-                    /\ status[r] = "normal"
+HandlePrepare(r) == /\ status[r] = "normal"
                     /\ \E msg \in msgs:
                         /\ msg.type = "PREPARE"
-                        /\ msg.v = viewNum[r]
+                        /\ msg.m.requestNum > clientTable[r][msg.m.clientId]
+                        /\ ~IsPrimary(r)
+                        /\ viewNum[r] = msg.v
                         /\ msg.n = opNum[r] + 1
                         /\ opNum' = [opNum EXCEPT ![r] = @ + 1]
                         \* Note previous commit.
@@ -306,14 +294,12 @@ HandlePrepare(r) == /\ r # primary
                             [type: {"PREPAREOK"}, 
                              v: {viewNum[r]},
                              n: {opNum[r]'},
-                             i: {r},
-                             primary: {msg.m.primary}
+                             i: {r}
                             ]
-                        /\ UNCHANGED<<primary, viewNum, status, 
-                                        clientRequest, lastNormal>>
+                        /\ UNCHANGED<<viewNum, status, 
+                                        clientRequest, lastNormal, nounce>>
 
 \* Normal operation: Step 5.
-\* Note: not clear how to handle concurrent ongoing prepares: The primary waits for...
 \* TODO: client reply.
 HandlePrepareOk(r) == LET
                          prepareOkmsgs == {msg \in msgs: 
@@ -321,11 +307,10 @@ HandlePrepareOk(r) == LET
                                             /\ msg.v = viewNum[r]
                                             \* Ordering prepares in commit order.
                                             /\ msg.n = commitNum[r] + 1
-                                            /\ msg.primary = r
                                             /\ msg.i # r }
                          hasQuorum == Cardinality(prepareOkmsgs) >= F
                       IN
-                      /\ r = primary
+                      /\ IsPrimary(r)
                       /\ status[r] = "normal"
                       /\ hasQuorum
                       /\ commitNum' = [commitNum EXCEPT ![r] = @ + 1]
@@ -334,23 +319,22 @@ HandlePrepareOk(r) == LET
                              v: {viewNum[r]},
                              k: {commitNum[r]'}
                             ]
-                      /\ UNCHANGED<<primary, viewNum, status, 
+                      /\ UNCHANGED<<viewNum, status, 
                                         clientTable, log, opNum,
-                                        clientRequest, lastNormal>>
+                                        clientRequest, lastNormal, nounce>>
 
 \* Normal operation: Step 7.
-HandleCommit(r) == /\ r # primary
-                   /\ status[r] = "normal"
+HandleCommit(r) == /\ status[r] = "normal"
                    /\ \E msg \in msgs:
+                        /\ ~IsPrimary(r)
                         /\ msg.type = "COMMIT"
                         /\ msg.v = viewNum[r]
-                        \* TODO: should > ?
                         /\ msg.k > commitNum[r]
                         /\ msg.k =< opNum[r]
                         /\ commitNum' = [commitNum EXCEPT ![r] = msg.k]
                         /\ UNCHANGED<<viewNum, status, opNum, log, 
                                 msgs, clientTable, clientRequest, 
-                                primary, lastNormal>>
+                                lastNormal, nounce>>
 
 \* Start state transfer.
 \* Using info in PREPARE messages(todo: other messages?)
@@ -369,7 +353,7 @@ StartStateTransfer(r) == /\ status[r] = "normal"
                                             ]
                                         /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
                                                         clientTable, clientRequest, 
-                                                            primary, lastNormal>>
+                                                            lastNormal, nounce>>
 
 \* A replica responds to a GETSTATE message
 HandleGetState(r) == /\ status[r] = "normal"
@@ -385,7 +369,7 @@ HandleGetState(r) == /\ status[r] = "normal"
                             ]
                         /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
                                                         clientTable, clientRequest, 
-                                                            primary, lastNormal>>
+                                                            lastNormal, nounce>>
 
 \* A replica receives a NEWSTATE message
 HandleNewState(r) == /\ status[r] = "normal"
@@ -399,16 +383,73 @@ HandleNewState(r) == /\ status[r] = "normal"
                         /\ log' = [log EXCEPT ![r] = msg.l]
                         /\ commitNum' = [commitNum EXCEPT ![r] = msg.k]
                         /\ UNCHANGED<<status, msgs, clientTable, clientRequest, 
-                                            primary, lastNormal>>                   
+                                            lastNormal, nounce>>                   
+
+\* Start Recovery
+StartRecovery(r) == 
+              /\ nounce[r][2] < N
+              /\ status[r] = "recovering"
+              /\ nounce' = [nounce EXCEPT ![r] = <<@[1], @[2] + 1>>]
+              /\ msgs' = msgs \cup
+                        [type: {"RECOVERY"},
+                         x: {nounce'[r]},
+                         i: {r}
+                        ]
+              /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
+                                clientTable, clientRequest, 
+                                lastNormal>>
+
+\* Respond to recovery
+HandleRecoveryRequest(r) == 
+                     /\ status[r] = "normal"
+                     /\ \E msg \in msgs:
+                        /\ msg.type = "RECOVERY"
+                        /\ msgs' = msgs \cup
+                            [type: {"RECOVERYRESPONSE"},
+                             v: {viewNum[r]}, 
+                             x: {msg.x}, 
+                             l: {log[r]}, 
+                             n: {opNum[r]}, 
+                             k: {commitNum[r]},
+                             isPrimary: {IsPrimary(r)}
+                            ]
+                        /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
+                                clientTable, clientRequest, 
+                                lastNormal, nounce>>
+
+\* Recovery completed
+Recover(r) == LET
+                MaxView(S) == CHOOSE x \in S : \A y \in S : y.v <= x.v
+                responses == {msg \in msgs: /\ msg.type = "RECOVERYRESPONSE" 
+                                            /\ msg.x = nounce[r]}
+                primaryResponses == {msg \in responses: msg.isPrimary /\ msg.v = MaxView(responses).v}
+                canRecover == Cardinality(responses) >= F+1 /\ Cardinality(primaryResponses) = 1
+                info == IF canRecover THEN CHOOSE x \in primaryResponses: TRUE ELSE FALSE
+              IN  
+              /\ status[r] = "recovering"
+              /\ canRecover
+              /\ viewNum' = [viewNum EXCEPT ![r] = info.v]
+              /\ log' = [log EXCEPT ![r] = info.l]
+              /\ opNum' = [opNum EXCEPT ![r] = info.n]
+              /\ commitNum' = [commitNum EXCEPT ![r] = info.k]
+              /\ status' = [status EXCEPT ![r] = "normal"]
+              /\ lastNormal' = [lastNormal EXCEPT ![r] = info.v]
+              /\ UNCHANGED<<msgs, clientTable, clientRequest, nounce>>
+
+Crash(r) == /\ nounce[r][2] < N
+            /\ status[r] \notin {"recovering"}
+            /\ status' = [status EXCEPT ![r] = "recovering"]
+            /\ UNCHANGED<<viewNum, opNum, log, commitNum, 
+                                msgs, clientTable, clientRequest, 
+                                lastNormal, nounce>>
 
 Next == \/ \E c \in Client: 
             \/ SendRequest(c)
         \/ \E r \in Replica:
             \/ HandleRequest(r)
             \/ HandlePrepare(r)
-            \/ HandleStartViewChange(r)
+            \/ NoticeViewChange(r)
             \/ SendDoViewChange(r)
-            \/ HandleDoViewChange(r)
             \/ CompleteViewChange(r)
             \/ HandleStartView(r)
             \/ HandlePrepareOk(r)
@@ -417,10 +458,14 @@ Next == \/ \E c \in Client:
             \/ StartStateTransfer(r)
             \/ HandleGetState(r)
             \/ HandleNewState(r)
+            \/ StartRecovery(r)
+            \/ HandleRecoveryRequest(r)
+            \/ Recover(r)
+            \/ Crash(r)
 
 Spec  ==  Init  /\  [][Next]_<<viewNum, status, opNum, log, commitNum, 
                                 msgs, clientTable, clientRequest, 
-                                primary, lastNormal>>
+                                lastNormal, nounce>>
 ============================================================================
 THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk)
 =============================================================================
