@@ -4,6 +4,13 @@ VARIABLE viewNum, status, opNum, log, commitNum,
             msgs, clientTable, clientRequest, lastNormal, nounce
 CONSTANT N, Empty, F
 ----------------------------------------------------------------------------
+\* Specification based on "Viewstamped Replication Revisited"
+\* found at https://dspace.mit.edu/handle/1721.1/71763
+\*
+\* Covers only:
+\* 1. Normal operation(without some client interaction parts).
+\* 2. View change.
+\* 3. Recovery.
 
 Replica == 1..N
 Client == 1..N
@@ -116,11 +123,24 @@ TypeOk == /\ viewNum \in [Replica -> View]
 ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
                      /\ commitNum[r1] = commitNum[r2]
-                     /\ commitNum[r1] > 1
                      /\ status[r1] = status[r2]
                      /\ status[r1] = "normal") =>
                          \A n \in 1..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
+
+\* Safety property of recovery.
+\* We don't reset `lastNormal` on crash, 
+\* so it can be used here for assertions.
+\* Appears to be an inductive invariant,
+\* adding a safety propety implied by it 
+\* would require history variables, I think.
+RecoveryOk == \A r \in Replica:
+                LET
+                    quorum == {rr \in Replica: 
+                                /\ status[rr] = "normal" 
+                                /\ viewNum[rr] >= lastNormal[r]}
+                IN
+                /\ status[r] = "recovering" => Cardinality(quorum) = F + 1           
 -----------------------------------------------------------------------------
 
 Init == /\ viewNum = [r \in Replica |->  1]
@@ -240,7 +260,8 @@ HandleStartView(r) == \E msg \in msgs:
                         /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
                         /\ status' = [status EXCEPT ![r] = "normal"]
                         /\ log' = [log EXCEPT ![r] = msg.l]
-                        \* TODO: execute and prepare uncommitted.
+                        \* Note: execution and prepare of uncommitted
+                        \* happens when relevant messages are handled after view change(I think).
                         /\ commitNum' = [commitNum EXCEPT ![r] = msg.k]
                         /\ opNum' = [opNum EXCEPT ![r] = msg.n]
                         /\ UNCHANGED<<msgs, clientTable, clientRequest, viewNum, nounce>>
@@ -436,7 +457,10 @@ Recover(r) == LET
               /\ lastNormal' = [lastNormal EXCEPT ![r] = info.v]
               /\ UNCHANGED<<msgs, clientTable, clientRequest, nounce>>
 
-Crash(r) == /\ nounce[r][2] < N
+\* Assumption: only F simultaneous failure, as per the paper: 
+\* "the protocol is live, assuming no more that f replicas fail simultaneously."
+Crash(r) == /\ Cardinality({rr \in Replica: status[rr] = "recovering"}) \in {0, F}
+            /\ nounce[r][2] < N
             /\ status[r] \notin {"recovering"}
             /\ status' = [status EXCEPT ![r] = "recovering"]
             /\ UNCHANGED<<viewNum, opNum, log, commitNum, 
@@ -467,5 +491,5 @@ Spec  ==  Init  /\  [][Next]_<<viewNum, status, opNum, log, commitNum,
                                 msgs, clientTable, clientRequest, 
                                 lastNormal, nounce>>
 ============================================================================
-THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk)
+THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk /\ RecoveryOk)
 =============================================================================
