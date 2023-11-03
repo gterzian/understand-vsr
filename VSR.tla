@@ -119,7 +119,10 @@ TypeOk == /\ viewNum \in [Replica -> View]
           /\ nounce \in [Replica -> Replica \X Op]
           /\ msgs \subseteq Message
 
-\* Safety property of view changes.
+\* Safety property(non-inductive invariant) 
+\* of view changes:
+\* At any time of normal operation, 
+\* logs are in sync op to a given commit.
 ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
                      /\ commitNum[r1] = commitNum[r2]
@@ -127,6 +130,24 @@ ViewChangeOk == \A r1, r2 \in Replica:
                      /\ status[r1] = "normal") =>
                          \A n \in 1..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
+
+\* Stab at an inductive invariant implying
+\* the safety propery of view changes.
+\* "any operation o that committed in view 
+\* v is known to at least f + 1 replicas"
+IViewChangeOk == \A op \in Op:
+                    /\ op > 1 =>
+                        \E r \in Replica:
+                        LET
+                            quorum 
+                                == {rr \in Replica: 
+                                        /\ commitNum[rr] >= op
+                                        /\ \A n \in 1..commitNum[r]: 
+                                            /\ log[rr][n] = log[r][n]
+                                      }
+                        IN
+                        /\ commitNum[r] >= op 
+                            => Cardinality(quorum) >= F + 1   
 
 \* Safety property of recovery.
 \* We don't reset `lastNormal` on crash, 
@@ -491,5 +512,5 @@ Spec  ==  Init  /\  [][Next]_<<viewNum, status, opNum, log, commitNum,
                                 msgs, clientTable, clientRequest, 
                                 lastNormal, nounce>>
 ============================================================================
-THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk /\ RecoveryOk)
+THEOREM  Spec  =>  [](TypeOk /\ ViewChangeOk /\ IViewChangeOk /\ RecoveryOk)
 =============================================================================
