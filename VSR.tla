@@ -17,7 +17,11 @@ Client == 1..N
 View == 1..N
 Op == 1..N
 LogEntry == Client \X Op
+
 ASSUME Empty \notin LogEntry
+
+\* Use replica groups of size 2f + 1.
+ASSUME (2*F) + 1 = N 
 
 \* Round-robin primary using viewNum
 IsPrimary(r) == viewNum[r] % N = r
