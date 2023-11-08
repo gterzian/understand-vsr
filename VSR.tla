@@ -12,10 +12,10 @@ CONSTANT N, Empty, F
 \* 2. View change.
 \* 3. Recovery.
 
-Replica == 1..N
-Client == 1..N
-View == 1..N
-Op == 1..N
+Replica == 0..N
+Client == 0..N
+View == 0..N
+Op == 0..N
 LogEntry == Client \X Op
 
 ASSUME Empty \notin LogEntry
@@ -132,7 +132,7 @@ ViewChangeOk == \A r1, r2 \in Replica:
                      /\ commitNum[r1] = commitNum[r2]
                      /\ status[r1] = status[r2]
                      /\ status[r1] = "normal") =>
-                         \A n \in 1..commitNum[r1]: 
+                         \A n \in 0..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
 
 \* Stab at an inductive invariant implying
@@ -168,15 +168,15 @@ RecoveryOk == \A r \in Replica:
                 /\ status[r] = "recovering" => Cardinality(quorum) = F + 1           
 -----------------------------------------------------------------------------
 
-Init == /\ viewNum = [r \in Replica |->  1]
-        /\ lastNormal = [r \in Replica |->  1]
-        /\ opNum = [r \in Replica |->  1]
-        /\ commitNum = [r \in Replica |-> 1]
+Init == /\ viewNum = [r \in Replica |->  0]
+        /\ lastNormal = [r \in Replica |-> 0]
+        /\ opNum = [r \in Replica |->  0]
+        /\ commitNum = [r \in Replica |-> 0]
         /\ status = [r \in Replica |->  "normal"]
         /\ log = [r \in Replica |->  [op \in Op |-> Empty]]
-        /\ clientTable = [r \in Replica |->  [c \in Client |-> 1]]
-        /\ clientRequest = [c \in Client |-> 1]
-        /\ nounce = [r \in Replica |->  <<r, 1>>]
+        /\ clientTable = [r \in Replica |->  [c \in Client |-> 0]]
+        /\ clientRequest = [c \in Client |-> 0]
+        /\ nounce = [r \in Replica |->  <<r, 0>>]
         /\ msgs = {}
 
 \* View Change: step 1. 

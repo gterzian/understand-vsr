@@ -349,9 +349,23 @@ impl From<String> for ClientId {
     }
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate)]
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
+enum ReplicaStatus {
+    #[default]
+    Normal,
+    Recovering,
+    ViewChange
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
 struct Replica {
-    /// Election data.
+    view: u64,
+    last_normal: u64,
+    op_num: u64,
+    commit_num: u64,
+    log: Vec<LogEntry>,
+    status: ReplicaStatus,
     epoch: u64,
     is_leader: bool,
 }
@@ -461,10 +475,7 @@ async fn main() {
     let doc_handle = if bootstrap {
         let mut vsr: VSR = Default::default();
         for replica_id in customers.clone() {
-            let participant = Replica {
-                epoch: 0,
-                is_leader: false,
-            };
+            let participant = Default::default();
             vsr.participants
                 .insert(ReplicaId(replica_id.to_string()), participant);
         }
