@@ -10,6 +10,7 @@ use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
@@ -21,95 +22,24 @@ use tokio::time::{sleep, Duration};
 
 const MAX: usize = 1000;
 
+fn is_leader(replica: &Replica, id: &ReplicaId) -> bool {
+    replica.view.checked_rem(3).unwrap() == u64::from_str(&id.0).unwrap()
+}
+
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
 }
 
 async fn read(State(state): State<Arc<AppState>>) -> Json<Option<Reply>> {
-    let replica_id = state.replica_id.clone();
-    let is_leader = state.doc_handle.with_doc_mut(|doc| {
-        let mut vsr: VSR = hydrate(doc).unwrap();
-
-        // Run election
-        let _ = leader_algorithm(&mut vsr, &replica_id);
-
-        let our_info = vsr.participants.get(&replica_id).unwrap();
-        our_info.is_leader
-    });
-
-    if !is_leader {
-        return Json(None);
-    }
-
     let (tx, rx) = oneshot::channel();
     let _ = state.command_sender.send((ClientOp::Read, tx)).await;
     Json(rx.await.unwrap_or(None))
 }
 
 async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Reply>> {
-    let replica_id = state.replica_id.clone();
-    let is_leader = state.doc_handle.with_doc_mut(|doc| {
-        let mut vsr: VSR = hydrate(doc).unwrap();
-
-        // Run election
-        let _ = leader_algorithm(&mut vsr, &replica_id);
-
-        let our_info = vsr.participants.get(&replica_id).unwrap();
-        our_info.is_leader
-    });
-
-    if !is_leader {
-        return Json(None);
-    }
-
     let (tx, rx) = oneshot::channel();
     let _ = state.command_sender.send((ClientOp::Incr, tx)).await;
     Json(rx.await.unwrap_or(None))
-}
-
-fn leader_algorithm(election: &mut VSR, replica_id: &ReplicaId) -> ElectionOutcome {
-    let (our_epoch, our_past_leadership) = {
-        let our_info = election.participants.get_mut(replica_id).unwrap();
-        (our_info.epoch, our_info.is_leader)
-    };
-
-    let mut our_new_leadership = true;
-    for (id, info) in election.participants.iter() {
-        if id == replica_id {
-            continue;
-        }
-        let our_epoch_minus_theirs = our_epoch.saturating_sub(info.epoch);
-        if replica_id > id {
-            if our_epoch_minus_theirs < 3 && info.is_leader {
-                our_new_leadership = false;
-            }
-        } else if our_epoch_minus_theirs < 3 && !our_past_leadership {
-            our_new_leadership = false;
-        }
-    }
-
-    let outcome = if !our_past_leadership && our_new_leadership {
-        ElectionOutcome::NewlyElected
-    } else if our_past_leadership && !our_new_leadership {
-        ElectionOutcome::SteppedDown
-    } else {
-        ElectionOutcome::Unchanged
-    };
-
-    let max_epoch = election
-        .participants
-        .values()
-        .map(|info| info.epoch)
-        .max()
-        .unwrap();
-    let our_info = election.participants.get_mut(replica_id).unwrap();
-    our_info.epoch = if let ElectionOutcome::NewlyElected = outcome {
-        max_epoch + 1
-    } else {
-        max_epoch
-    };
-    our_info.is_leader = our_new_leadership;
-    outcome
 }
 
 fn execute_state_machine(
@@ -151,6 +81,12 @@ async fn run_primary_algorithm(
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
 
+            let our_info = vsr.replicas.get_mut(replica_id).unwrap();
+
+            if !is_leader(our_info, replica_id) {
+                return;
+            }
+
             let mut tx = doc.transaction();
             reconcile(&mut tx, &vsr).unwrap();
             tx.commit();
@@ -175,6 +111,11 @@ async fn run_backup_algorithm(
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
+            let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+
+            if is_leader(our_info, replica_id) {
+                return;
+            }
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &vsr).unwrap();
@@ -187,24 +128,96 @@ async fn run_backup_algorithm(
     }
 }
 
-async fn run_heartbeat_algorithm(
+async fn run_view_change_algorithm(
     doc_handle: DocHandle,
     replica_id: ReplicaId,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
+    let mut start_view_change = false;
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
 
-            let our_info = vsr.participants.get_mut(&replica_id).unwrap();
-            our_info.epoch = our_info.epoch.checked_add(1).unwrap_or(0);
+            // ReplacePrimary(every 3 secs).
+            {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                if start_view_change && our_info.status.is_normal() {
+                    our_info.last_normal = our_info.view;
+                    our_info.view += 1;
+                    our_info.status.start_view_change();
+                    start_view_change = false;
+                }
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
+                return;
+            }
 
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &vsr).unwrap();
-            tx.commit();
+            // NoticeViewChange
+            {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let max_view = vsr
+                    .replicas
+                    .iter()
+                    .map(|(_, info)| info.view)
+                    .max()
+                    .unwrap();
+                if max_view > our_info.view && our_info.status.is_normal() {
+                    our_info.last_normal = our_info.view;
+                    our_info.view = max_view;
+                    our_info.status.start_view_change();
+                }
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
+                return;
+            }
+
+            // CompleteViewChange
+            {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let same_view = vsr
+                    .replicas
+                    .iter()
+                    .filter(|(_, info)| info.view == our_info.view)
+                    .count();
+                if same_view > 1
+                    && our_info.status.is_view_change()
+                    && is_leader(our_info, &replica_id)
+                {
+                    our_info.last_normal = our_info.view;
+                    our_info.status.complete_view_change();
+                }
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
+                return;
+            }
+
+            // HandleStartView
+            {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let leader_is_normal = vsr
+                    .replicas
+                    .iter()
+                    .filter(|(id, info)| {
+                        info.view == our_info.view && is_leader(info, id) && info.status.is_normal()
+                    })
+                    .count();
+                if leader_is_normal > 0 && our_info.status.is_view_change() {
+                    our_info.last_normal = our_info.view;
+                    our_info.status.complete_view_change();
+                }
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
+                return;
+            }
         });
         tokio::select! {
-            _ = sleep(Duration::from_millis(3000)) => {},
+            _ = sleep(Duration::from_millis(3000)) => {
+                start_view_change = true;
+            },
             _ = shutdown.changed() => return,
         };
     }
@@ -349,13 +362,32 @@ impl From<String> for ClientId {
     }
 }
 
-
-#[derive(Debug, Clone, Reconcile, Hydrate, Default)]
+#[derive(Debug, Clone, Reconcile, Hydrate, Default, Eq, PartialEq)]
 enum ReplicaStatus {
     #[default]
     Normal,
     Recovering,
-    ViewChange
+    ViewChange,
+}
+
+impl ReplicaStatus {
+    fn is_normal(&self) -> bool {
+        matches!(self, ReplicaStatus::Normal)
+    }
+
+    fn is_view_change(&self) -> bool {
+        matches!(self, ReplicaStatus::ViewChange)
+    }
+
+    fn start_view_change(&mut self) {
+        assert_eq!(*self, ReplicaStatus::Normal);
+        *self = ReplicaStatus::ViewChange;
+    }
+
+    fn complete_view_change(&mut self) {
+        assert_eq!(*self, ReplicaStatus::ViewChange);
+        *self = ReplicaStatus::Normal;
+    }
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Default)]
@@ -366,13 +398,11 @@ struct Replica {
     commit_num: u64,
     log: Vec<LogEntry>,
     status: ReplicaStatus,
-    epoch: u64,
-    is_leader: bool,
 }
 
 #[derive(Default, Debug, Clone, Reconcile, Hydrate)]
 struct VSR {
-    participants: HashMap<ReplicaId, Replica>,
+    replicas: HashMap<ReplicaId, Replica>,
 }
 
 struct NoStorage;
@@ -476,7 +506,7 @@ async fn main() {
         let mut vsr: VSR = Default::default();
         for replica_id in customers.clone() {
             let participant = Default::default();
-            vsr.participants
+            vsr.replicas
                 .insert(ReplicaId(replica_id.to_string()), participant);
         }
 
@@ -541,7 +571,7 @@ async fn main() {
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
     let heartbeat = handle.spawn(async move {
-        run_heartbeat_algorithm(doc_handle_clone, id, shutdown).await;
+        run_view_change_algorithm(doc_handle_clone, id, shutdown).await;
     });
 
     let http_addrs_clone = http_addrs.clone();
