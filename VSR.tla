@@ -21,7 +21,7 @@ LogEntry == Client \X Op
 ASSUME Empty \notin LogEntry
 
 \* Use replica groups of size 2f + 1.
-ASSUME (2*F) + 1 = N 
+ASSUME (2*F) + 1 = N+1 
 
 \* Round-robin primary using viewNum
 IsPrimary(r) == viewNum[r] % N = r
@@ -146,7 +146,7 @@ IViewChangeOk == \A op \in Op:
                             quorum 
                                 == {rr \in Replica: 
                                         /\ commitNum[rr] >= op
-                                        /\ \A n \in 1..commitNum[r]: 
+                                        /\ \A n \in 0..commitNum[r]: 
                                             /\ log[rr][n] = log[r][n]
                                       }
                         IN

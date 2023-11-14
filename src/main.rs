@@ -23,6 +23,12 @@ use tokio::time::{sleep, Duration};
 const MAX: usize = 1000;
 
 fn is_leader(replica: &Replica, id: &ReplicaId) -> bool {
+    println!(
+        "Leader: {:?} {:?} {:?}",
+        replica.view,
+        replica.view.checked_rem(3).unwrap(),
+        u64::from_str(&id.0).unwrap()
+    );
     replica.view.checked_rem(3).unwrap() == u64::from_str(&id.0).unwrap()
 }
 
@@ -141,77 +147,111 @@ async fn run_view_change_algorithm(
             // ReplacePrimary(every 3 secs).
             {
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                println!(
+                    "Step 1: {:?}, {:?}",
+                    start_view_change,
+                    our_info.status.is_normal()
+                );
                 if start_view_change && our_info.status.is_normal() {
+                    println!("Start view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
                     our_info.view += 1;
                     our_info.status.start_view_change();
                     start_view_change = false;
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &vsr).unwrap();
+                    tx.commit();
+                    return;
                 }
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &vsr).unwrap();
-                tx.commit();
-                return;
             }
 
             // NoticeViewChange
             {
+                let max_view = {
+                    let our_info = vsr.replicas.get(&replica_id).unwrap();
+                    vsr.replicas
+                        .iter()
+                        .map(|(_, info)| info.view)
+                        .max()
+                        .unwrap()
+                };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                let max_view = vsr
-                    .replicas
-                    .iter()
-                    .map(|(_, info)| info.view)
-                    .max()
-                    .unwrap();
+                println!(
+                    "Step 2: {:?}, {:?}, {:?}",
+                    max_view,
+                    our_info.view,
+                    our_info.status.is_normal()
+                );
                 if max_view > our_info.view && our_info.status.is_normal() {
+                    println!("Notice view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
                     our_info.view = max_view;
                     our_info.status.start_view_change();
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &vsr).unwrap();
+                    tx.commit();
+                    return;
                 }
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &vsr).unwrap();
-                tx.commit();
-                return;
             }
 
             // CompleteViewChange
             {
+                let same_view = {
+                    let our_info = vsr.replicas.get(&replica_id).unwrap();
+                    vsr.replicas
+                        .iter()
+                        .filter(|(_, info)| info.view == our_info.view)
+                        .count()
+                };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                let same_view = vsr
-                    .replicas
-                    .iter()
-                    .filter(|(_, info)| info.view == our_info.view)
-                    .count();
+                println!(
+                    "Step 3: {:?}, {:?}, {:?}",
+                    same_view,
+                    our_info.status.is_view_change(),
+                    is_leader(our_info, &replica_id)
+                );
                 if same_view > 1
                     && our_info.status.is_view_change()
                     && is_leader(our_info, &replica_id)
                 {
+                    println!("Complete view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
                     our_info.status.complete_view_change();
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &vsr).unwrap();
+                    tx.commit();
+                    return;
                 }
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &vsr).unwrap();
-                tx.commit();
-                return;
             }
 
             // HandleStartView
             {
+                let leader_is_normal = {
+                    let our_info = vsr.replicas.get(&replica_id).unwrap();
+                    vsr.replicas
+                        .iter()
+                        .filter(|(id, info)| {
+                            info.view == our_info.view
+                                && is_leader(info, id)
+                                && info.status.is_normal()
+                        })
+                        .count()
+                };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                let leader_is_normal = vsr
-                    .replicas
-                    .iter()
-                    .filter(|(id, info)| {
-                        info.view == our_info.view && is_leader(info, id) && info.status.is_normal()
-                    })
-                    .count();
+                println!(
+                    "Step 4: {:?}, {:?}",
+                    leader_is_normal,
+                    our_info.status.is_view_change()
+                );
                 if leader_is_normal > 0 && our_info.status.is_view_change() {
+                    println!("Start new view: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
                     our_info.status.complete_view_change();
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &vsr).unwrap();
+                    tx.commit();
+                    return;
                 }
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &vsr).unwrap();
-                tx.commit();
-                return;
             }
         });
         tokio::select! {
@@ -441,7 +481,7 @@ async fn main() {
     let handle = Handle::current();
 
     // All customers, including ourself.
-    let customers: Vec<String> = vec!["1", "2", "3"]
+    let customers: Vec<String> = vec!["0", "1", "2"]
         .into_iter()
         .map(|id| id.to_string())
         .collect();

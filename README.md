@@ -7,8 +7,8 @@ What makes Viewstamped Replication tick?
 found at https://dspace.mit.edu/handle/1721.1/71763.
 
 1. Start the bootstap peer:
-   - `cargo run --release -- --bootstrap --replica-id "1"`
+   - `cargo run --release -- --bootstrap --replica-id "0"`
 2. Start two other peers:
+   - `cargo run --release --  --replica-id "1"`
    - `cargo run --release --  --replica-id "2"`
-   - `cargo run --release --  --replica-id "3"`
 3. Watch the peers replicate a log of values, using it to implement a replicated state machine supporting "read" and "increment" operations on a number.
