@@ -134,6 +134,59 @@ async fn run_backup_algorithm(
     }
 }
 
+async fn run_state_transfer_algorithm(
+    doc_handle: DocHandle,
+    replica_id: &ReplicaId,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
+    loop {
+        doc_handle.with_doc_mut(|doc| {
+            let mut vsr: VSR = hydrate(doc).unwrap();
+            let max_view = {
+                vsr.replicas
+                    .iter()
+                    .map(|(_, info)| info.view)
+                    .max()
+                    .unwrap()
+            };
+            let max_op = {
+                vsr.replicas
+                    .iter()
+                    .map(|(_, info)| info.op_num)
+                    .max()
+                    .unwrap()
+            };
+            // StartStateTransfer.
+            let should_transfer = {
+                let our_info = vsr.replicas.get(&replica_id).unwrap();
+                our_info.view < max_view || our_info.op_num < max_op
+            };
+
+            if should_transfer {
+                // HandleGetState.
+                let from_info = vsr
+                    .replicas
+                    .iter()
+                    .find(|(_, info)| info.view == max_view && info.op_num == max_op)
+                    .clone();
+                if let Some(from) = from_info {
+                    // HandleNewState.
+                    let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                    our_info.view = max_view;
+                    our_info.op_num = max_op;
+                    let mut tx = doc.transaction();
+                    reconcile(&mut tx, &vsr).unwrap();
+                    tx.commit();
+                }
+            }
+        });
+        tokio::select! {
+            _ = doc_handle.changed() => {},
+            _ = shutdown.changed() => return,
+        };
+    }
+}
+
 async fn run_view_change_algorithm(
     doc_handle: DocHandle,
     replica_id: ReplicaId,
@@ -168,7 +221,6 @@ async fn run_view_change_algorithm(
             // NoticeViewChange
             {
                 let max_view = {
-                    let our_info = vsr.replicas.get(&replica_id).unwrap();
                     vsr.replicas
                         .iter()
                         .map(|(_, info)| info.view)
@@ -610,8 +662,15 @@ async fn main() {
     let doc_handle_clone = doc_handle.clone();
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
-    let heartbeat = handle.spawn(async move {
+    let view_change = handle.spawn(async move {
         run_view_change_algorithm(doc_handle_clone, id, shutdown).await;
+    });
+
+    let doc_handle_clone = doc_handle.clone();
+    let id = replica_id.clone();
+    let shutdown = shutdown_rx.clone();
+    let state_transfer = handle.spawn(async move {
+        run_state_transfer_algorithm(doc_handle_clone, &id, shutdown).await;
     });
 
     let http_addrs_clone = http_addrs.clone();
@@ -645,7 +704,8 @@ async fn main() {
             reader.await.unwrap();
             primary.await.unwrap();
             backup.await.unwrap();
-            heartbeat.await.unwrap();
+            view_change.await.unwrap();
+            state_transfer.await.unwrap();
 
             // Stop repo.
             Handle::current()

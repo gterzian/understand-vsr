@@ -386,18 +386,17 @@ HandleCommit(r) == /\ status[r] = "normal"
 \* Using info in PREPARE messages(todo: other messages?)
 \* Note: not switching approach on whether view or only opNum is outdated,
 \* in both case updating entire log and state.
-StartStateTransfer(r) == /\ status[r] = "normal"
-                                    /\ \E msg \in msgs:
-                                        /\ msg.type = "PREPARE"
-                                        /\ \/ /\ msg.v = viewNum[r]
-                                              /\ msg.n > opNum[r]
-                                           \/ /\ msg.v > viewNum[r]
-                                        /\ msgs' = msgs \cup 
-                                            [type: {"GETSTATE"},
-                                             v: IF msg.v > viewNum[r] THEN {msg.v} ELSE {viewNum[r]},
-                                             n: {opNum[r]}
-                                            ]
-                                        /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
+StartStateTransfer(r) == /\ \E msg \in msgs:
+                            /\ msg.type = "PREPARE"
+                            /\ \/ /\ msg.v = viewNum[r]
+                                  /\ msg.n > opNum[r]
+                               \/ /\ msg.v > viewNum[r]
+                            /\ msgs' = msgs \cup 
+                                [type: {"GETSTATE"},
+                                 v: IF msg.v > viewNum[r] THEN {msg.v} ELSE {viewNum[r]},
+                                 n: {opNum[r]}
+                                ]
+                            /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
                                                         clientTable, clientRequest, 
                                                             lastNormal, nounce>>
 
