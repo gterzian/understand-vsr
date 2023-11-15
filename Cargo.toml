@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-automerge_repo = { git = "https://github.com/automerge/automerge-repo-rs", features = ["tokio"] }
+automerge_repo = { git = "https://github.com/automerge/automerge-repo-rs", rev="847d0ff53ace756599eaf5380740b9c2ab356b1b", features = ["tokio"] }
 automerge = { version = "0.4.1" }
 autosurgeon = "0.7.1"
 clap = { version = "4.2.5", features = ["derive"] }
