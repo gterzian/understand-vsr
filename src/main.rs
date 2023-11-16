@@ -156,34 +156,38 @@ async fn run_state_transfer_algorithm(
                     .max()
                     .unwrap()
             };
+
             // StartStateTransfer.
             let should_transfer = {
                 let our_info = vsr.replicas.get(&replica_id).unwrap();
                 our_info.view < max_view || our_info.op_num < max_op
             };
 
-            if should_transfer {
+            // HandleGetState.
+            let from_info = if should_transfer {
                 println!("Start state transfer");
-                // HandleGetState.
-                let from_info = vsr.replicas.iter().find_map(|(_, info)| {
+                vsr.replicas.iter().find_map(|(_, info)| {
                     if info.view == max_view && info.op_num == max_op {
                         Some(info.clone())
                     } else {
                         None
                     }
-                });
-                if let Some(from) = from_info {
-                    // HandleNewState.
-                    println!("Finishing state transfer");
-                    let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                    our_info.view = from.view;
-                    our_info.op_num = from.op_num;
-                    our_info.commit_num = from.commit_num;
-                    our_info.log = from.log;
-                    let mut tx = doc.transaction();
-                    reconcile(&mut tx, &vsr).unwrap();
-                    tx.commit();
-                }
+                })
+            } else {
+                None
+            };
+
+            // HandleNewState.
+            if let Some(from) = from_info {
+                println!("Finishing state transfer");
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                our_info.view = from.view;
+                our_info.op_num = from.op_num;
+                our_info.commit_num = from.commit_num;
+                our_info.log = from.log;
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
             }
         });
         tokio::select! {
