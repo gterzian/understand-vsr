@@ -163,6 +163,7 @@ async fn run_state_transfer_algorithm(
             };
 
             if should_transfer {
+                println!("Start state transfer");
                 // HandleGetState.
                 let from_info = vsr
                     .replicas
@@ -171,6 +172,7 @@ async fn run_state_transfer_algorithm(
                     .clone();
                 if let Some(from) = from_info {
                     // HandleNewState.
+                    println!("Finishing state transfer");
                     let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
                     our_info.view = max_view;
                     our_info.op_num = max_op;

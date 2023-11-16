@@ -139,19 +139,18 @@ ViewChangeOk == \A r1, r2 \in Replica:
 \* the safety propery of view changes.
 \* "any operation o that committed in view 
 \* v is known to at least f + 1 replicas"
-IViewChangeOk == \A op \in Op:
-                    /\ op > 1 =>
-                        \E r \in Replica:
-                        LET
-                            quorum 
-                                == {rr \in Replica: 
-                                        /\ commitNum[rr] >= op
-                                        /\ \A n \in 0..commitNum[r]: 
-                                            /\ log[rr][n] = log[r][n]
-                                      }
-                        IN
-                        /\ commitNum[r] >= op 
-                            => Cardinality(quorum) >= F + 1   
+IViewChangeOk == \A op \in Op: \E r \in Replica:
+                    LET
+                        quorum 
+                            == {rr \in Replica: 
+                                /\ commitNum[rr] >= op
+                                /\ \A n \in 0..commitNum[r]: 
+                                    /\ log[rr][n] = log[r][n]
+                                }    
+                    IN
+                    /\ commitNum[r] >= op 
+                        => Cardinality(quorum) >= F + 1
+                           
 
 \* Safety property of recovery.
 \* We don't reset `lastNormal` on crash, 
