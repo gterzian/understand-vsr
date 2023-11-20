@@ -20,16 +20,14 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 
-const MAX: usize = 1000;
-
 fn is_leader(replica: &Replica, id: &ReplicaId) -> bool {
     println!(
         "Leader: {:?} {:?} {:?}",
         replica.view,
-        replica.view.checked_rem(3).unwrap(),
+        replica.view.0.checked_rem(3).unwrap(),
         u64::from_str(&id.0).unwrap()
     );
-    replica.view.checked_rem(3).unwrap() == u64::from_str(&id.0).unwrap()
+    replica.view.0.checked_rem(3).unwrap() == u64::from_str(&id.0).unwrap()
 }
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
@@ -77,20 +75,55 @@ async fn run_primary_algorithm(
     mut command_receiver: Receiver<(ClientOp, oneshot::Sender<Option<Reply>>)>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
-    let mut pending_client_commands: VecDeque<(ClientOp, oneshot::Sender<Option<Reply>>)> =
+    let mut incoming_client_commands: VecDeque<(ClientOp, oneshot::Sender<Option<Reply>>)> =
         Default::default();
-    let mut ballot_number_to_client_request: Vec<Option<oneshot::Sender<Option<Reply>>>> = vec![];
-    for _ in 0..MAX {
-        ballot_number_to_client_request.push(None);
-    }
+    let mut pending_client_commands: VecDeque<oneshot::Sender<Option<Reply>>> = Default::default();
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
 
-            let our_info = vsr.replicas.get_mut(replica_id).unwrap();
+            {
+                let our_info = vsr.replicas.get(replica_id).unwrap();
 
-            if !is_leader(our_info, replica_id) || !our_info.status.is_normal() {
-                return;
+                if !is_leader(our_info, replica_id) || !our_info.status.is_normal() {
+                    return;
+                }
+            }
+
+            // HandleRequest.
+            if !incoming_client_commands.is_empty() {
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
+                let (command, sender) = incoming_client_commands.pop_front().unwrap();
+                pending_client_commands.push_back(sender);
+                our_info.op_num.0 += 1;
+                our_info.log.push(LogEntry {
+                    client: ClientId(String::new()),
+                    op: command,
+                });
+            }
+
+            // HandlePrepareOk.
+            let (our_view, our_commit) = vsr
+                .replicas
+                .iter()
+                .find_map(|(id, info)| {
+                    if id == replica_id {
+                        Some((info.view, info.commit_num))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let has_quorum = vsr
+                .replicas
+                .iter()
+                .find(|(id, info)| {
+                    id != &replica_id && info.view == our_view && info.op_num.0 == our_commit.0 + 1
+                })
+                .is_some();
+            if has_quorum {
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
+                our_info.commit_num.0 += 1;
             }
 
             let mut tx = doc.transaction();
@@ -100,7 +133,7 @@ async fn run_primary_algorithm(
         tokio::select! {
             cmd = command_receiver.recv() => {
                 if let Some(cmd) = cmd {
-                    pending_client_commands.push_back(cmd);
+                    incoming_client_commands.push_back(cmd);
                 }
             }
             _ = doc_handle.changed() => {},
@@ -117,15 +150,37 @@ async fn run_backup_algorithm(
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
-            let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
 
-            if is_leader(our_info, replica_id) || !our_info.status.is_normal() {
-                return;
+            let (our_op_num, our_commit_num, our_view) = {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+
+                if is_leader(our_info, replica_id) || !our_info.status.is_normal() {
+                    return;
+                }
+                (our_info.op_num, our_info.commit_num, our_info.view)
+            };
+
+            let leader_info_updated = vsr.replicas.iter().find_map(|(id, info)| {
+                if info.view == our_view
+                    && (info.op_num > our_op_num || info.commit_num > our_commit_num)
+                    && is_leader(info, id)
+                {
+                    Some(info.clone())
+                } else {
+                    None
+                }
+            });
+
+            // HandlePrepare.
+            if let Some(info) = leader_info_updated {
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                our_info.commit_num = info.commit_num;
+                our_info.op_num = info.op_num;
+                our_info.log = info.log;
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
             }
-
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &vsr).unwrap();
-            tx.commit();
         });
         tokio::select! {
             _ = doc_handle.changed() => {},
@@ -218,7 +273,7 @@ async fn run_view_change_algorithm(
                 if start_view_change && our_info.status.is_normal() {
                     println!("Start view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
-                    our_info.view += 1;
+                    our_info.view.0 += 1;
                     our_info.status.start_view_change();
                     start_view_change = false;
                     let mut tx = doc.transaction();
@@ -398,9 +453,6 @@ enum ClientOp {
     Incr,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Ord, PartialOrd)]
-struct View(u64);
-
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 struct Nounce {
     replica: ReplicaId,
@@ -485,12 +537,21 @@ impl ReplicaStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, Reconcile, Hydrate, Default, Eq, PartialEq, Ord, PartialOrd)]
+struct ViewNum(u64);
+
+#[derive(Debug, Clone, Copy, Reconcile, Hydrate, Default, Eq, PartialEq, Ord, PartialOrd)]
+struct OpNum(u64);
+
+#[derive(Debug, Clone, Copy, Reconcile, Hydrate, Default, Eq, PartialEq, Ord, PartialOrd)]
+struct CommitNum(u64);
+
 #[derive(Debug, Clone, Reconcile, Hydrate, Default)]
 struct Replica {
-    view: u64,
-    last_normal: u64,
-    op_num: u64,
-    commit_num: u64,
+    view: ViewNum,
+    last_normal: ViewNum,
+    op_num: OpNum,
+    commit_num: CommitNum,
     log: Vec<LogEntry>,
     status: ReplicaStatus,
 }
