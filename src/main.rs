@@ -21,12 +21,6 @@ use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 
 fn is_leader(replica: &Replica, id: &ReplicaId) -> bool {
-    println!(
-        "Leader: {:?} {:?} {:?}",
-        replica.view,
-        replica.view.0.checked_rem(3).unwrap(),
-        u64::from_str(&id.0).unwrap()
-    );
     replica.view.0.checked_rem(3).unwrap() == u64::from_str(&id.0).unwrap()
 }
 
@@ -83,9 +77,22 @@ async fn run_primary_algorithm(
             let mut vsr: VSR = hydrate(doc).unwrap();
 
             {
-                let our_info = vsr.replicas.get(replica_id).unwrap();
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
 
                 if !is_leader(our_info, replica_id) || !our_info.status.is_normal() {
+                    // Reset the client command state,
+                    // send back None to all pending commands.
+                    incoming_client_commands.drain(..).for_each(|(_, chan)| {
+                        chan.send(None).unwrap();
+                    });
+                    pending_client_commands.drain(..).for_each(|chan| {
+                        chan.send(None).unwrap();
+                    });
+
+                    // Remove uncommitted entries.
+                    our_info
+                        .log
+                        .split_off(our_info.commit_num.0.try_into().unwrap());
                     return;
                 }
             }
@@ -93,13 +100,15 @@ async fn run_primary_algorithm(
             // HandleRequest.
             if !incoming_client_commands.is_empty() {
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
-                let (command, sender) = incoming_client_commands.pop_front().unwrap();
-                pending_client_commands.push_back(sender);
-                our_info.op_num.0 += 1;
-                our_info.log.push(LogEntry {
-                    client: ClientId(String::new()),
-                    op: command,
-                });
+                if our_info.op_num.0 == our_info.commit_num.0 {
+                    let (command, sender) = incoming_client_commands.pop_front().unwrap();
+                    pending_client_commands.push_back(sender);
+                    our_info.op_num.0 += 1;
+                    our_info.log.push(LogEntry {
+                        client: ClientId(String::new()),
+                        op: command,
+                    });
+                }
             }
 
             // HandlePrepareOk.
@@ -124,6 +133,7 @@ async fn run_primary_algorithm(
             if has_quorum {
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.commit_num.0 += 1;
+                println!("Committed {:?}", our_info.commit_num);
             }
 
             let mut tx = doc.transaction();
@@ -177,6 +187,7 @@ async fn run_backup_algorithm(
                 our_info.commit_num = info.commit_num;
                 our_info.op_num = info.op_num;
                 our_info.log = info.log;
+                println!("Prepared {:?}", our_info.op_num);
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &vsr).unwrap();
                 tx.commit();
@@ -265,11 +276,6 @@ async fn run_view_change_algorithm(
             // ReplacePrimary(every 3 secs).
             {
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                println!(
-                    "Step 1: {:?}, {:?}",
-                    start_view_change,
-                    our_info.status.is_normal()
-                );
                 if start_view_change && our_info.status.is_normal() {
                     println!("Start view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
@@ -293,12 +299,6 @@ async fn run_view_change_algorithm(
                         .unwrap()
                 };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                println!(
-                    "Step 2: {:?}, {:?}, {:?}",
-                    max_view,
-                    our_info.view,
-                    our_info.status.is_normal()
-                );
                 if max_view > our_info.view && our_info.status.is_normal() {
                     println!("Notice view change: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
@@ -321,12 +321,6 @@ async fn run_view_change_algorithm(
                         .count()
                 };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                println!(
-                    "Step 3: {:?}, {:?}, {:?}",
-                    same_view,
-                    our_info.status.is_view_change(),
-                    is_leader(our_info, &replica_id)
-                );
                 if same_view > 1
                     && our_info.status.is_view_change()
                     && is_leader(our_info, &replica_id)
@@ -355,11 +349,6 @@ async fn run_view_change_algorithm(
                         .count()
                 };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                println!(
-                    "Step 4: {:?}, {:?}",
-                    leader_is_normal,
-                    our_info.status.is_view_change()
-                );
                 if leader_is_normal > 0 && our_info.status.is_view_change() {
                     println!("Start new view: {:?}", our_info.view);
                     our_info.last_normal = our_info.view;
@@ -372,9 +361,65 @@ async fn run_view_change_algorithm(
             }
         });
         tokio::select! {
-            _ = sleep(Duration::from_millis(3000)) => {
+            _ = sleep(Duration::from_millis(10000)) => {
                 start_view_change = true;
             },
+            _ = doc_handle.changed() => {},
+            _ = shutdown.changed() => return,
+        };
+    }
+}
+
+async fn run_recovery_algorithm(
+    doc_handle: DocHandle,
+    replica_id: &ReplicaId,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
+    loop {
+        doc_handle.with_doc_mut(|doc| {
+            let mut vsr: VSR = hydrate(doc).unwrap();
+
+            {
+                let our_info = vsr.replicas.get(&replica_id).unwrap();
+                if !our_info.status.is_recovering() {
+                    return;
+                }
+            }
+
+            let max_view = vsr
+                .replicas
+                .iter()
+                .filter_map(|(id, info)| {
+                    if info.status.is_normal() {
+                        Some(info.view)
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap();
+            if let Some(leader_info) = vsr.replicas.iter().find_map(|(id, info)| {
+                if info.status.is_normal() && info.view == max_view && is_leader(info, id) {
+                    Some(info.clone())
+                } else {
+                    None
+                }
+            }) {
+                // Recover.
+                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                our_info.view = leader_info.view;
+                our_info.op_num = leader_info.op_num;
+                our_info.commit_num = leader_info.commit_num;
+                our_info.log = leader_info.log;
+                our_info.last_normal = our_info.view;
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &vsr).unwrap();
+                tx.commit();
+                println!("Recovered");
+            }
+        });
+        tokio::select! {
+            _ = doc_handle.changed() => {},
             _ = shutdown.changed() => return,
         };
     }
@@ -434,6 +479,8 @@ async fn request_read(http_addrs: Vec<String>, mut shutdown: tokio::sync::watch:
 struct Args {
     #[arg(long)]
     bootstrap: bool,
+    #[arg(long)]
+    recover: bool,
     #[arg(long)]
     replica_id: String,
 }
@@ -522,6 +569,15 @@ impl ReplicaStatus {
         matches!(self, ReplicaStatus::Normal)
     }
 
+    fn is_recovering(&self) -> bool {
+        matches!(self, ReplicaStatus::Recovering)
+    }
+
+    fn complete_recovery(&mut self) {
+        assert_eq!(*self, ReplicaStatus::Recovering);
+        *self = ReplicaStatus::Normal;
+    }
+
     fn is_view_change(&self) -> bool {
         matches!(self, ReplicaStatus::ViewChange)
     }
@@ -593,8 +649,13 @@ impl Storage for NoStorage {
 async fn main() {
     let args = Args::parse();
     let bootstrap = args.bootstrap;
+    let recover = args.recover;
     let replica_id = args.replica_id.clone();
     let handle = Handle::current();
+
+    if bootstrap {
+        assert!(!recover);
+    }
 
     // All customers, including ourself.
     let customers: Vec<String> = vec!["0", "1", "2"]
@@ -699,11 +760,22 @@ async fn main() {
 
     let replica_id = ReplicaId(replica_id);
 
-    let (tx, rx) = mpsc::channel(100);
+    if recover {
+        doc_handle.with_doc_mut(|doc| {
+            let mut vsr: VSR = hydrate(doc).unwrap();
 
+            let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+            our_info.status = ReplicaStatus::Recovering;
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &vsr).unwrap();
+            tx.commit();
+        });
+    }
+
+    let (leader_tx, leader_rx) = mpsc::channel(100);
     let app_state = Arc::new(AppState {
         doc_handle: doc_handle.clone(),
-        command_sender: tx,
+        command_sender: leader_tx,
         replica_id: replica_id.clone(),
     });
 
@@ -713,7 +785,7 @@ async fn main() {
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
     let primary = handle.spawn(async move {
-        run_primary_algorithm(&doc_handle_clone, &id, rx, shutdown).await;
+        run_primary_algorithm(&doc_handle_clone, &id, leader_rx, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
@@ -735,6 +807,13 @@ async fn main() {
     let shutdown = shutdown_rx.clone();
     let state_transfer = handle.spawn(async move {
         run_state_transfer_algorithm(doc_handle_clone, &id, shutdown).await;
+    });
+
+    let doc_handle_clone = doc_handle.clone();
+    let id = replica_id.clone();
+    let shutdown = shutdown_rx.clone();
+    let primary = handle.spawn(async move {
+        run_recovery_algorithm(doc_handle_clone, &id, shutdown).await;
     });
 
     let http_addrs_clone = http_addrs.clone();
