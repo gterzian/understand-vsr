@@ -41,20 +41,20 @@ async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Reply>> {
 }
 
 fn execute_state_machine(
-    ballot_number_to_client_request: &mut [Option<oneshot::Sender<Option<Reply>>>],
-    log: &[Option<LogEntry>],
+    pending_client_commands: &mut [Option<oneshot::Sender<Option<Reply>>>],
+    log: &[LogEntry],
+    commit: CommitNum,
 ) {
     let mut state = 0;
     for (index, entry) in log.iter().enumerate() {
-        let cmd = match entry {
-            Some(entry) => &entry.op,
-            None => break,
-        };
-        let new_execution = match cmd {
-            ClientOp::Read => ballot_number_to_client_request[index].take(),
+        if index > commit.0.try_into().unwrap() {
+            break;
+        }
+        let new_execution = match &entry.op {
+            ClientOp::Read => pending_client_commands[index].take(),
             ClientOp::Incr => {
                 state += 1;
-                ballot_number_to_client_request[index].take()
+                pending_client_commands[index].take()
             }
         };
         if let Some(chan) = new_execution {
@@ -71,7 +71,8 @@ async fn run_primary_algorithm(
 ) {
     let mut incoming_client_commands: VecDeque<(ClientOp, oneshot::Sender<Option<Reply>>)> =
         Default::default();
-    let mut pending_client_commands: VecDeque<oneshot::Sender<Option<Reply>>> = Default::default();
+    let mut pending_client_commands: Vec<Option<oneshot::Sender<Option<Reply>>>> =
+        Default::default();
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut vsr: VSR = hydrate(doc).unwrap();
@@ -86,7 +87,9 @@ async fn run_primary_algorithm(
                         chan.send(None).unwrap();
                     });
                     pending_client_commands.drain(..).for_each(|chan| {
-                        chan.send(None).unwrap();
+                        if let Some(chan) = chan {
+                            chan.send(None).unwrap();
+                        }
                     });
 
                     // Remove uncommitted entries.
@@ -102,7 +105,7 @@ async fn run_primary_algorithm(
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 if our_info.op_num.0 == our_info.commit_num.0 {
                     let (command, sender) = incoming_client_commands.pop_front().unwrap();
-                    pending_client_commands.push_back(sender);
+                    pending_client_commands.push(Some(sender));
                     our_info.op_num.0 += 1;
                     our_info.log.push(LogEntry {
                         client: ClientId(String::new()),
@@ -134,6 +137,11 @@ async fn run_primary_algorithm(
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.commit_num.0 += 1;
                 println!("Committed {:?}", our_info.commit_num);
+                execute_state_machine(
+                    &mut pending_client_commands,
+                    &our_info.log,
+                    our_info.commit_num,
+                );
             }
 
             let mut tx = doc.transaction();
@@ -412,6 +420,7 @@ async fn run_recovery_algorithm(
                 our_info.commit_num = leader_info.commit_num;
                 our_info.log = leader_info.log;
                 our_info.last_normal = our_info.view;
+                our_info.status.complete_recovery();
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &vsr).unwrap();
                 tx.commit();
