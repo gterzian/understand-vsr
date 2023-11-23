@@ -12,3 +12,5 @@ found at https://dspace.mit.edu/handle/1721.1/71763.
    - `cargo run --release --  --replica-id "1"`
    - `cargo run --release --  --replica-id "2"`
 3. Watch the peers replicate a log of values, using it to implement a replicated state machine supporting "read" and "increment" operations on a number.
+
+To simulate a crash, stop a replica and re-start it with the `--recover` flag. 
