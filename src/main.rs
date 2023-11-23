@@ -1,4 +1,3 @@
-use automerge_repo::fs_store::FsStore;
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
 use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 use axum::extract::State;
@@ -11,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use tempfile::TempDir;
+use std::sync::Arc;
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -50,14 +49,18 @@ fn execute_state_machine(
         if index == commit {
             break;
         }
-        
+
         match &entry.op {
-            ClientOp::Read => {},
+            ClientOp::Read => {}
             ClientOp::Incr => state += 1,
         }
-        
+
         if index == commit - 1 {
-            pending_client_command.take().unwrap().send(Some(Reply(state))).unwrap();
+            pending_client_command
+                .take()
+                .unwrap()
+                .send(Some(Reply(state)))
+                .unwrap();
         }
     }
 }
@@ -70,11 +73,10 @@ async fn run_primary_algorithm(
 ) {
     let mut incoming_client_commands: VecDeque<(ClientOp, oneshot::Sender<Option<Reply>>)> =
         Default::default();
-    let mut pending_client_command: Option<oneshot::Sender<Option<Reply>>> =
-        Default::default();
+    let mut pending_client_command: Option<oneshot::Sender<Option<Reply>>> = Default::default();
     loop {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
+            let mut vsr: Vsr = hydrate(doc).unwrap();
 
             {
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
@@ -92,7 +94,7 @@ async fn run_primary_algorithm(
                     // Remove uncommitted entries.
                     our_info
                         .log
-                        .split_off(our_info.commit_num.0.try_into().unwrap());
+                        .truncate(our_info.commit_num.0.try_into().unwrap());
                     return;
                 }
             }
@@ -123,13 +125,9 @@ async fn run_primary_algorithm(
                     }
                 })
                 .unwrap();
-            let has_quorum = vsr
-                .replicas
-                .iter()
-                .find(|(id, info)| {
-                    id != &replica_id && info.view == our_view && info.op_num.0 == our_commit.0 + 1
-                })
-                .is_some();
+            let has_quorum = vsr.replicas.iter().any(|(id, info)| {
+                id != replica_id && info.view == our_view && info.op_num.0 == our_commit.0 + 1
+            });
             if has_quorum {
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.commit_num.0 += 1;
@@ -164,10 +162,10 @@ async fn run_backup_algorithm(
 ) {
     loop {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
+            let mut vsr: Vsr = hydrate(doc).unwrap();
 
             let (our_op_num, our_commit_num, our_view) = {
-                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
 
                 if is_leader(our_info, replica_id) || !our_info.status.is_normal() {
                     return;
@@ -188,7 +186,7 @@ async fn run_backup_algorithm(
 
             // HandlePrepare.
             if let Some(info) = leader_info_updated {
-                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.commit_num = info.commit_num;
                 our_info.op_num = info.op_num;
                 our_info.log = info.log;
@@ -212,25 +210,13 @@ async fn run_state_transfer_algorithm(
 ) {
     loop {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
-            let max_view = {
-                vsr.replicas
-                    .iter()
-                    .map(|(_, info)| info.view)
-                    .max()
-                    .unwrap()
-            };
-            let max_op = {
-                vsr.replicas
-                    .iter()
-                    .map(|(_, info)| info.op_num)
-                    .max()
-                    .unwrap()
-            };
+            let mut vsr: Vsr = hydrate(doc).unwrap();
+            let max_view = { vsr.replicas.values().map(|info| info.view).max().unwrap() };
+            let max_op = { vsr.replicas.values().map(|info| info.op_num).max().unwrap() };
 
             // StartStateTransfer.
             let should_transfer = {
-                let our_info = vsr.replicas.get(&replica_id).unwrap();
+                let our_info = vsr.replicas.get(replica_id).unwrap();
                 our_info.view < max_view || our_info.op_num < max_op
             };
 
@@ -251,7 +237,7 @@ async fn run_state_transfer_algorithm(
             // HandleNewState.
             if let Some(from) = from_info {
                 println!("Finishing state transfer");
-                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.view = from.view;
                 our_info.op_num = from.op_num;
                 our_info.commit_num = from.commit_num;
@@ -276,7 +262,7 @@ async fn run_view_change_algorithm(
     let mut start_view_change = false;
     loop {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
+            let mut vsr: Vsr = hydrate(doc).unwrap();
 
             // ReplacePrimary(every 3 secs).
             {
@@ -287,7 +273,7 @@ async fn run_view_change_algorithm(
                         our_info.last_normal = our_info.view;
                         our_info.status.start_view_change();
                     }
-                    our_info.view.0 += 1;     
+                    our_info.view.0 += 1;
                     start_view_change = false;
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &vsr).unwrap();
@@ -298,13 +284,7 @@ async fn run_view_change_algorithm(
 
             // NoticeViewChange
             {
-                let max_view = {
-                    vsr.replicas
-                        .iter()
-                        .map(|(_, info)| info.view)
-                        .max()
-                        .unwrap()
-                };
+                let max_view = { vsr.replicas.values().map(|info| info.view).max().unwrap() };
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
                 if max_view > our_info.view && our_info.status.is_normal() {
                     println!("Notice view change: {:?}", our_info.view);
@@ -363,7 +343,6 @@ async fn run_view_change_algorithm(
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &vsr).unwrap();
                     tx.commit();
-                    return;
                 }
             }
         });
@@ -385,23 +364,16 @@ async fn run_recovery_algorithm(
 ) {
     loop {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
+            let mut vsr: Vsr = hydrate(doc).unwrap();
 
             {
-                let our_info = vsr.replicas.get(&replica_id).unwrap();
+                let our_info = vsr.replicas.get(replica_id).unwrap();
                 if !our_info.status.is_recovering() {
                     return;
                 }
             }
 
-            let max_view = vsr
-                .replicas
-                .iter()
-                .filter_map(|(id, info)| {
-                    Some(info.view)
-                })
-                .max()
-                .unwrap();
+            let max_view = vsr.replicas.values().map(|info| info.view).max().unwrap();
             if let Some(leader_info) = vsr.replicas.iter().find_map(|(id, info)| {
                 if info.status.is_normal() && info.view == max_view && is_leader(info, id) {
                     Some(info.clone())
@@ -410,7 +382,7 @@ async fn run_recovery_algorithm(
                 }
             }) {
                 // Recover.
-                let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
+                let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 our_info.view = leader_info.view;
                 our_info.op_num = leader_info.op_num;
                 our_info.commit_num = leader_info.commit_num;
@@ -493,7 +465,6 @@ struct Args {
 struct AppState {
     doc_handle: DocHandle,
     command_sender: Sender<(ClientOp, oneshot::Sender<Option<Reply>>)>,
-    replica_id: ReplicaId,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Deserialize, Serialize)]
@@ -618,7 +589,7 @@ struct Replica {
 }
 
 #[derive(Default, Debug, Clone, Reconcile, Hydrate)]
-struct VSR {
+struct Vsr {
     replicas: HashMap<ReplicaId, Replica>,
 }
 
@@ -725,7 +696,7 @@ async fn main() {
     });
 
     let doc_handle = if bootstrap {
-        let mut vsr: VSR = Default::default();
+        let mut vsr: Vsr = Default::default();
         for replica_id in customers.clone() {
             let participant = Default::default();
             vsr.replicas
@@ -767,7 +738,7 @@ async fn main() {
 
     if recover {
         doc_handle.with_doc_mut(|doc| {
-            let mut vsr: VSR = hydrate(doc).unwrap();
+            let mut vsr: Vsr = hydrate(doc).unwrap();
 
             let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
             our_info.status = ReplicaStatus::Recovering;
@@ -781,7 +752,6 @@ async fn main() {
     let app_state = Arc::new(AppState {
         doc_handle: doc_handle.clone(),
         command_sender: leader_tx,
-        replica_id: replica_id.clone(),
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
@@ -789,7 +759,7 @@ async fn main() {
     let doc_handle_clone = doc_handle.clone();
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
-    let primary = handle.spawn(async move {
+    let _primary = handle.spawn(async move {
         run_primary_algorithm(&doc_handle_clone, &id, leader_rx, shutdown).await;
     });
 
