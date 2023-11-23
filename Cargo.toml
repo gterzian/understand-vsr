@@ -1,0 +1,18 @@
+[package]
+name = "understand-vsr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+automerge_repo = { git = "https://github.com/automerge/automerge-repo-rs", rev="847d0ff53ace756599eaf5380740b9c2ab356b1b", features = ["tokio"] }
+automerge = { version = "0.4.1" }
+autosurgeon = "0.7.1"
+clap = { version = "4.2.5", features = ["derive"] }
+reqwest = { version = "0.11.17", features = ["json", "blocking"], default-features = false }
+axum = { version = "0.6.18" }
+axum-macros = "0.3.7"
+tokio = { version = "1.27", features = ["full"] }
+futures = { version = "0.3.28" }
+tempfile = "3.8.0"
+rand = "0.8.5"
+serde = { version = "1.0.160", features = ["derive"]}

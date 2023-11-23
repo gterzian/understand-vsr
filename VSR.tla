@@ -12,16 +12,16 @@ CONSTANT N, Empty, F
 \* 2. View change.
 \* 3. Recovery.
 
-Replica == 1..N
-Client == 1..N
-View == 1..N
-Op == 1..N
+Replica == 0..N
+Client == 0..N
+View == 0..N
+Op == 0..N
 LogEntry == Client \X Op
 
 ASSUME Empty \notin LogEntry
 
 \* Use replica groups of size 2f + 1.
-ASSUME (2*F) + 1 = N 
+ASSUME (2*F) + 1 = N+1 
 
 \* Round-robin primary using viewNum
 IsPrimary(r) == viewNum[r] % N = r
@@ -132,26 +132,25 @@ ViewChangeOk == \A r1, r2 \in Replica:
                      /\ commitNum[r1] = commitNum[r2]
                      /\ status[r1] = status[r2]
                      /\ status[r1] = "normal") =>
-                         \A n \in 1..commitNum[r1]: 
+                         \A n \in 0..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
 
 \* Stab at an inductive invariant implying
 \* the safety propery of view changes.
 \* "any operation o that committed in view 
 \* v is known to at least f + 1 replicas"
-IViewChangeOk == \A op \in Op:
-                    /\ op > 1 =>
-                        \E r \in Replica:
-                        LET
-                            quorum 
-                                == {rr \in Replica: 
-                                        /\ commitNum[rr] >= op
-                                        /\ \A n \in 1..commitNum[r]: 
-                                            /\ log[rr][n] = log[r][n]
-                                      }
-                        IN
-                        /\ commitNum[r] >= op 
-                            => Cardinality(quorum) >= F + 1   
+IViewChangeOk == \A op \in Op: \E r \in Replica:
+                    LET
+                        quorum 
+                            == {rr \in Replica: 
+                                /\ commitNum[rr] >= op
+                                /\ \A n \in 0..commitNum[r]: 
+                                    /\ log[rr][n] = log[r][n]
+                                }    
+                    IN
+                    /\ commitNum[r] >= op 
+                        => Cardinality(quorum) >= F + 1
+                           
 
 \* Safety property of recovery.
 \* We don't reset `lastNormal` on crash, 
@@ -168,15 +167,15 @@ RecoveryOk == \A r \in Replica:
                 /\ status[r] = "recovering" => Cardinality(quorum) = F + 1           
 -----------------------------------------------------------------------------
 
-Init == /\ viewNum = [r \in Replica |->  1]
-        /\ lastNormal = [r \in Replica |->  1]
-        /\ opNum = [r \in Replica |->  1]
-        /\ commitNum = [r \in Replica |-> 1]
+Init == /\ viewNum = [r \in Replica |->  0]
+        /\ lastNormal = [r \in Replica |-> 0]
+        /\ opNum = [r \in Replica |->  0]
+        /\ commitNum = [r \in Replica |-> 0]
         /\ status = [r \in Replica |->  "normal"]
         /\ log = [r \in Replica |->  [op \in Op |-> Empty]]
-        /\ clientTable = [r \in Replica |->  [c \in Client |-> 1]]
-        /\ clientRequest = [c \in Client |-> 1]
-        /\ nounce = [r \in Replica |->  <<r, 1>>]
+        /\ clientTable = [r \in Replica |->  [c \in Client |-> 0]]
+        /\ clientRequest = [c \in Client |-> 0]
+        /\ nounce = [r \in Replica |->  <<r, 0>>]
         /\ msgs = {}
 
 \* View Change: step 1. 
@@ -203,7 +202,6 @@ NoticeViewChange(r) == \E msg \in msgs:
                             /\ msg.type \in {"DOVIEWCHANGE", "STARTVIEWCHANGE"}
                             /\ msg.i # r 
                             /\ msg.v > viewNum[r]
-                            /\ status[r] = "normal"
                             /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
                             /\ viewNum' = [viewNum EXCEPT ![r] = msg.v]
                             /\ status' = [status EXCEPT ![r] = "view-change"]
@@ -386,18 +384,17 @@ HandleCommit(r) == /\ status[r] = "normal"
 \* Using info in PREPARE messages(todo: other messages?)
 \* Note: not switching approach on whether view or only opNum is outdated,
 \* in both case updating entire log and state.
-StartStateTransfer(r) == /\ status[r] = "normal"
-                                    /\ \E msg \in msgs:
-                                        /\ msg.type = "PREPARE"
-                                        /\ \/ /\ msg.v = viewNum[r]
-                                              /\ msg.n > opNum[r]
-                                           \/ /\ msg.v > viewNum[r]
-                                        /\ msgs' = msgs \cup 
-                                            [type: {"GETSTATE"},
-                                             v: IF msg.v > viewNum[r] THEN {msg.v} ELSE {viewNum[r]},
-                                             n: {opNum[r]}
-                                            ]
-                                        /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
+StartStateTransfer(r) == /\ \E msg \in msgs:
+                            /\ msg.type = "PREPARE"
+                            /\ \/ /\ msg.v = viewNum[r]
+                                  /\ msg.n > opNum[r]
+                               \/ /\ msg.v > viewNum[r]
+                            /\ msgs' = msgs \cup 
+                                [type: {"GETSTATE"},
+                                 v: IF msg.v > viewNum[r] THEN {msg.v} ELSE {viewNum[r]},
+                                 n: {opNum[r]}
+                                ]
+                            /\ UNCHANGED<<viewNum, status, opNum, log, commitNum, 
                                                         clientTable, clientRequest, 
                                                             lastNormal, nounce>>
 
