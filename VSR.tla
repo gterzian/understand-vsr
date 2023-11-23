@@ -202,7 +202,6 @@ NoticeViewChange(r) == \E msg \in msgs:
                             /\ msg.type \in {"DOVIEWCHANGE", "STARTVIEWCHANGE"}
                             /\ msg.i # r 
                             /\ msg.v > viewNum[r]
-                            /\ status[r] = "normal"
                             /\ lastNormal' = [lastNormal EXCEPT ![r] = viewNum[r]]
                             /\ viewNum' = [viewNum EXCEPT ![r] = msg.v]
                             /\ status' = [status EXCEPT ![r] = "view-change"]

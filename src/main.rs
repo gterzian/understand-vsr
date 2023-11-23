@@ -41,24 +41,23 @@ async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Reply>> {
 }
 
 fn execute_state_machine(
-    pending_client_commands: &mut [Option<oneshot::Sender<Option<Reply>>>],
+    pending_client_command: &mut Option<oneshot::Sender<Option<Reply>>>,
     log: &[LogEntry],
-    commit: CommitNum,
+    commit: usize,
 ) {
     let mut state = 0;
     for (index, entry) in log.iter().enumerate() {
-        if index > commit.0.try_into().unwrap() {
+        if index == commit {
             break;
         }
-        let new_execution = match &entry.op {
-            ClientOp::Read => pending_client_commands[index].take(),
-            ClientOp::Incr => {
-                state += 1;
-                pending_client_commands[index].take()
-            }
-        };
-        if let Some(chan) = new_execution {
-            chan.send(Some(Reply(state))).unwrap();
+        
+        match &entry.op {
+            ClientOp::Read => {},
+            ClientOp::Incr => state += 1,
+        }
+        
+        if index == commit - 1 {
+            pending_client_command.take().unwrap().send(Some(Reply(state))).unwrap();
         }
     }
 }
@@ -71,7 +70,7 @@ async fn run_primary_algorithm(
 ) {
     let mut incoming_client_commands: VecDeque<(ClientOp, oneshot::Sender<Option<Reply>>)> =
         Default::default();
-    let mut pending_client_commands: Vec<Option<oneshot::Sender<Option<Reply>>>> =
+    let mut pending_client_command: Option<oneshot::Sender<Option<Reply>>> =
         Default::default();
     loop {
         doc_handle.with_doc_mut(|doc| {
@@ -86,11 +85,9 @@ async fn run_primary_algorithm(
                     incoming_client_commands.drain(..).for_each(|(_, chan)| {
                         chan.send(None).unwrap();
                     });
-                    pending_client_commands.drain(..).for_each(|chan| {
-                        if let Some(chan) = chan {
-                            chan.send(None).unwrap();
-                        }
-                    });
+                    if let Some(chan) = pending_client_command.take() {
+                        chan.send(None).unwrap();
+                    }
 
                     // Remove uncommitted entries.
                     our_info
@@ -105,7 +102,7 @@ async fn run_primary_algorithm(
                 let our_info = vsr.replicas.get_mut(replica_id).unwrap();
                 if our_info.op_num.0 == our_info.commit_num.0 {
                     let (command, sender) = incoming_client_commands.pop_front().unwrap();
-                    pending_client_commands.push(Some(sender));
+                    pending_client_command = Some(sender);
                     our_info.op_num.0 += 1;
                     our_info.log.push(LogEntry {
                         client: ClientId(String::new()),
@@ -138,9 +135,9 @@ async fn run_primary_algorithm(
                 our_info.commit_num.0 += 1;
                 println!("Committed {:?}", our_info.commit_num);
                 execute_state_machine(
-                    &mut pending_client_commands,
+                    &mut pending_client_command,
                     &our_info.log,
-                    our_info.commit_num,
+                    our_info.commit_num.0.try_into().unwrap(),
                 );
             }
 
@@ -284,11 +281,13 @@ async fn run_view_change_algorithm(
             // ReplacePrimary(every 3 secs).
             {
                 let our_info = vsr.replicas.get_mut(&replica_id).unwrap();
-                if start_view_change && our_info.status.is_normal() {
+                if start_view_change {
                     println!("Start view change: {:?}", our_info.view);
-                    our_info.last_normal = our_info.view;
-                    our_info.view.0 += 1;
-                    our_info.status.start_view_change();
+                    if our_info.status.is_normal() {
+                        our_info.last_normal = our_info.view;
+                        our_info.status.start_view_change();
+                    }
+                    our_info.view.0 += 1;     
                     start_view_change = false;
                     let mut tx = doc.transaction();
                     reconcile(&mut tx, &vsr).unwrap();
@@ -369,8 +368,9 @@ async fn run_view_change_algorithm(
             }
         });
         tokio::select! {
-            _ = sleep(Duration::from_millis(10000)) => {
+            _ = sleep(Duration::from_millis(3000)) => {
                 start_view_change = true;
+                println!("Should see need for view change");
             },
             _ = doc_handle.changed() => {},
             _ = shutdown.changed() => return,
@@ -398,11 +398,7 @@ async fn run_recovery_algorithm(
                 .replicas
                 .iter()
                 .filter_map(|(id, info)| {
-                    if info.status.is_normal() {
-                        Some(info.view)
-                    } else {
-                        None
-                    }
+                    Some(info.view)
                 })
                 .max()
                 .unwrap();
