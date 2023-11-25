@@ -759,7 +759,7 @@ async fn main() {
     let doc_handle_clone = doc_handle.clone();
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
-    let _primary = handle.spawn(async move {
+    let primary = handle.spawn(async move {
         run_primary_algorithm(&doc_handle_clone, &id, leader_rx, shutdown).await;
     });
 
@@ -787,7 +787,7 @@ async fn main() {
     let doc_handle_clone = doc_handle.clone();
     let id = replica_id.clone();
     let shutdown = shutdown_rx.clone();
-    let primary = handle.spawn(async move {
+    let recovery = handle.spawn(async move {
         run_recovery_algorithm(doc_handle_clone, &id, shutdown).await;
     });
 
@@ -821,6 +821,7 @@ async fn main() {
             incrementer.await.unwrap();
             reader.await.unwrap();
             primary.await.unwrap();
+            recovery.await.unwrap();
             backup.await.unwrap();
             view_change.await.unwrap();
             state_transfer.await.unwrap();
