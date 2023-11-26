@@ -477,12 +477,6 @@ enum ClientOp {
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
-struct Nounce {
-    replica: ReplicaId,
-    value: u64,
-}
-
-#[derive(Debug, Clone, Reconcile, Hydrate)]
 struct LogEntry {
     client: ClientId,
     op: ClientOp,
