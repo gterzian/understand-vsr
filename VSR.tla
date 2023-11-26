@@ -481,7 +481,7 @@ Recover(r) == LET
 
 \* Assumption: only F simultaneous failure, as per the paper: 
 \* "the protocol is live, assuming no more that f replicas fail simultaneously."
-Crash(r) == /\ Cardinality({rr \in Replica: status[rr] = "recovering"}) \in {0, F}
+Crash(r) == /\ Cardinality({rr \in Replica: status[rr] = "recovering"}) < F
             /\ nounce[r][2] < N
             /\ status[r] \notin {"recovering"}
             /\ status' = [status EXCEPT ![r] = "recovering"]
