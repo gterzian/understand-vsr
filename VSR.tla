@@ -130,8 +130,7 @@ TypeOk == /\ viewNum \in [Replica -> View]
 ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
                      /\ commitNum[r1] = commitNum[r2]
-                     /\ status[r1] = status[r2]
-                     /\ status[r1] = "normal") =>
+                     ) =>
                          \A n \in 0..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
 
@@ -415,8 +414,7 @@ HandleGetState(r) == /\ status[r] = "normal"
                                                             lastNormal, nounce>>
 
 \* A replica receives a NEWSTATE message
-HandleNewState(r) == /\ status[r] = "normal"
-                     /\ \E msg \in msgs:
+HandleNewState(r) == /\ \E msg \in msgs:
                         /\ msg.type = "NEWSTATE"
                         /\ \/ /\ msg.v > viewNum[r]
                            \/ /\ msg.v = viewNum[r]
