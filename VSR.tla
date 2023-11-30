@@ -125,12 +125,11 @@ TypeOk == /\ viewNum \in [Replica -> View]
 
 \* Safety property(non-inductive invariant) 
 \* of view changes:
-\* At any time of normal operation, 
-\* logs are in sync op to a given commit.
+\* At any time, 
+\* logs are in sync up to a given commit.
 ViewChangeOk == \A r1, r2 \in Replica:
                     (/\ viewNum[r1] = viewNum[r2] 
-                     /\ commitNum[r1] = commitNum[r2]
-                     ) =>
+                     /\ commitNum[r1] = commitNum[r2]) =>
                          \A n \in 0..commitNum[r1]: 
                             /\ log[r1][n] = log[r2][n]
 
